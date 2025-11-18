@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.28;
 
 import {IERC20} from "./IERC20.sol";
@@ -11,17 +12,50 @@ contract MemToken is IERC20 {
     string public name;
     string public symbol;
     uint8 public immutable decimals;
- 
+    uint256 private tokenPrice; // wei per whole token unit
+
+    // Admin + Fees
+    address public admin;
+    uint256 public feeBps; // fee in basis points (1 BPS = 0.01% | 100 BPS = 1% | 10000 BPS = 100%)
+    uint256 public constant MAX_FEE_BPS = 10_000; // 100%
+    uint256 public lastFeeBurnTime;
+    uint256 public constant FEE_BURN_INTERVAL = 7 days;
+
+    // NEW-START ========================================================================================================================
+    struct Vote {
+        uint256 amount;
+        uint256 price;
+        bool vote;
+    }
+
+    uint256 public leadingPrice;
+    uint256 public leadingAmount;
+
+    mapping(address => Vote) public votes;
+    address[] public voterList;
+    mapping(uint256 => uint256) public priceTotals;
+    uint256 public votingStartedTime;
+    uint256 public votingNumber;
+    uint256 public timeToVote;
+
+    // NEW-END ========================================================================================================================
+
     constructor(
         string memory _name,
         string memory _symbol,
         uint8 _decimals,
-        uint256 initialSupply
+        uint256 initialSupply,
+        uint256 _timeToVote,
+        uint256 _feeBps
     ) {
         name = _name;
         symbol = _symbol;
         decimals = _decimals;
         _mint(msg.sender, initialSupply);
+        timeToVote = _timeToVote;
+        admin = msg.sender;
+        feeBps = _feeBps;
+        lastFeeBurnTime = block.timestamp;
     }
 
     function totalSupply() external view override returns (uint256) {
@@ -71,12 +105,19 @@ contract MemToken is IERC20 {
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
 
+        if (_votingActive()) {
+            require(
+                !votes[from].vote,
+                "Voting: voted accounts cannot transfer"
+            );
+        }
+
         uint256 fromBalance = _balances[from];
         require(fromBalance >= value, "ERC20: transfer amount exceeds balance");
         unchecked {
             _balances[from] = fromBalance - value;
+            _balances[to] += value;
         }
-        _balances[to] += value;
 
         emit Transfer(from, to, value);
     }
@@ -122,5 +163,151 @@ contract MemToken is IERC20 {
             _totalSupply -= value;
         }
         emit Transfer(account, address(0), value);
+    }
+
+    // NEW-START ========================================================================================================================
+    function startVoting() external {
+        require(
+            _balances[msg.sender] >= _votingThreshold(),
+            "Voting: requires >= 0.1% supply"
+        );
+        require(!_votingActive(), "Voting: already active");
+
+        votingStartedTime = block.timestamp;
+        votingNumber++;
+
+        emit VotingStarted(votingNumber, block.timestamp);
+    }
+
+    function vote(uint256 price) external {
+        uint256 voterBalance = _balances[msg.sender];
+        require(
+            voterBalance >= _minTokenAmount(),
+            "Voting: requires >= 0.05% supply"
+        );
+        require(_votingActive(), "Voting: no active voting");
+        require(!votes[msg.sender].vote, "Voting: already voted");
+
+        uint256 amount = voterBalance; // voting power equals current holder balance
+
+        votes[msg.sender] = Vote(amount, price, true);
+        voterList.push(msg.sender);
+
+        priceTotals[price] += amount;
+
+        if (priceTotals[price] > leadingAmount) {
+            leadingAmount = priceTotals[price];
+            leadingPrice = price;
+        }
+
+        emit Voted(msg.sender, price, amount);
+    }
+
+    function endVoting() external returns (uint256, uint256) {
+        require(_votingActive(), "Voting: not active");
+        require(
+            block.timestamp >= votingStartedTime + timeToVote,
+            "Voting: period not over"
+        );
+
+        tokenPrice = leadingPrice;
+
+        emit VotingEnded(leadingPrice);
+
+        _resetVoting();
+
+        return (leadingPrice, leadingAmount);
+    }
+
+    function buyToken() external payable {
+        require(
+            !_hasActiveVote(msg.sender),
+            "Voting: voter cannot buy during vote"
+        );
+        require(tokenPrice > 0, "Price: not set");
+        require(msg.value > 0, "Buy: zero ETH"); // msg.value in WEI
+
+        uint256 tokens = (msg.value * (10 ** uint256(decimals))) / tokenPrice;
+        require(tokens > 0, "Buy: amount too small");
+
+        uint256 fee = (tokens * feeBps) / MAX_FEE_BPS;
+        uint256 net = tokens - fee; // user receive
+
+        _mint(msg.sender, net);
+        if (fee > 0) {
+            _mint(address(this), fee);
+        }
+    }
+
+    function sellToken(uint256 amount) external {
+        require(
+            !_hasActiveVote(msg.sender),
+            "Voting: voter cannot sell during vote"
+        );
+        require(tokenPrice > 0, "Price: not set");
+        require(amount > 0, "Sell: zero amount");
+        require(_balances[msg.sender] >= amount, "Sell: insufficient balance");
+
+        uint256 fee = (amount * feeBps) / MAX_FEE_BPS;
+        uint256 net = amount - fee;
+        uint256 payout = (net * tokenPrice) / (10 ** uint256(decimals));
+        require(address(this).balance >= payout, "Sell: insufficient ETH pool");
+
+        if (fee > 0) {
+            _transfer(msg.sender, address(this), fee);
+        }
+        _burn(msg.sender, net);
+
+        (bool ok, ) = msg.sender.call{value: payout}("");
+        require(ok, "Sell: ETH transfer failed");
+    }
+
+    function _minTokenAmount() internal view returns (uint256) {
+        return _totalSupply / 2000;
+    }
+
+    function _votingThreshold() internal view returns (uint256) {
+        return _totalSupply / 1000;
+    }
+
+    function _votingActive() internal view returns (bool) {
+        return
+            votingStartedTime != 0 &&
+            block.timestamp < votingStartedTime + timeToVote;
+    }
+
+    function _hasActiveVote(address user) internal view returns (bool) {
+        return _votingActive() && votes[user].vote;
+    }
+
+    function _resetVoting() internal {
+        for (uint256 i = 0; i < voterList.length; i++) {
+            address user = voterList[i];
+            uint256 price = votes[user].price;
+
+            delete priceTotals[price];
+            delete votes[user]; // We can delete only vote, if we need track history
+        }
+
+        delete voterList;
+
+        leadingPrice = 0;
+        leadingAmount = 0;
+        votingStartedTime = 0;
+    }
+
+    // NEW-END ========================================================================================================================
+
+    // Admin functions
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Admin: not authorized");
+        _;
+    }
+
+    // Admin can call
+    function setFeeBps(uint256 _feeBps) external onlyAdmin {
+        require(_feeBps <= MAX_FEE_BPS, "Fee: too high");
+        feeBps = _feeBps;
+        emit FeeUpdated(_feeBps);
     }
 }
