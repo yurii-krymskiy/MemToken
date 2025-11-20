@@ -21,24 +21,19 @@ contract MemToken is IERC20 {
     uint256 public lastFeeBurnTime;
     uint256 public constant FEE_BURN_INTERVAL = 7 days;
 
-    // NEW-START ========================================================================================================================
     struct Vote {
         uint256 amount;
         uint256 price;
-        bool vote;
+        bool voted; 
     }
 
+    uint256 public currentSessionId;
     uint256 public leadingPrice;
-    uint256 public leadingAmount;
-
-    mapping(address => Vote) public votes;
-    address[] public voterList;
-    mapping(uint256 => uint256) public priceTotals;
+    mapping(uint256 => mapping(uint256 => uint256)) public priceTotals;
+    mapping(uint256 => mapping(address => Vote)) public votes;
     uint256 public votingStartedTime;
-    uint256 public votingNumber;
     uint256 public timeToVote;
 
-    // NEW-END ========================================================================================================================
 
     constructor(
         string memory _name,
@@ -105,13 +100,6 @@ contract MemToken is IERC20 {
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
 
-        if (_votingActive()) {
-            require(
-                !votes[from].vote,
-                "Voting: voted accounts cannot transfer"
-            );
-        }
-
         uint256 fromBalance = _balances[from];
         require(fromBalance >= value, "ERC20: transfer amount exceeds balance");
         unchecked {
@@ -165,7 +153,6 @@ contract MemToken is IERC20 {
         emit Transfer(account, address(0), value);
     }
 
-    // NEW-START ========================================================================================================================
     function startVoting() external {
         require(
             _balances[msg.sender] >= _votingThreshold(),
@@ -173,10 +160,11 @@ contract MemToken is IERC20 {
         );
         require(!_votingActive(), "Voting: already active");
 
+        currentSessionId++;
         votingStartedTime = block.timestamp;
-        votingNumber++;
+        leadingPrice = 0;
 
-        emit VotingStarted(votingNumber, block.timestamp);
+        emit VotingStarted(currentSessionId, block.timestamp);
     }
 
     function vote(uint256 price) external {
@@ -186,17 +174,17 @@ contract MemToken is IERC20 {
             "Voting: requires >= 0.05% supply"
         );
         require(_votingActive(), "Voting: no active voting");
-        require(!votes[msg.sender].vote, "Voting: already voted");
+        require(!votes[currentSessionId][msg.sender].voted, "Voting: already voted");
 
         uint256 amount = voterBalance; // voting power equals current holder balance
 
-        votes[msg.sender] = Vote(amount, price, true);
-        voterList.push(msg.sender);
+        votes[currentSessionId][msg.sender] = Vote(amount, price, true);
+        priceTotals[currentSessionId][price] += amount;
 
-        priceTotals[price] += amount;
-
-        if (priceTotals[price] > leadingAmount) {
-            leadingAmount = priceTotals[price];
+        if (
+            leadingPrice == 0 ||
+            priceTotals[currentSessionId][price] > priceTotals[currentSessionId][leadingPrice]
+        ) {
             leadingPrice = price;
         }
 
@@ -211,12 +199,13 @@ contract MemToken is IERC20 {
         );
 
         tokenPrice = leadingPrice;
+        uint256 leadingAmount_ = priceTotals[currentSessionId][leadingPrice];
 
         emit VotingEnded(leadingPrice);
 
         _resetVoting();
 
-        return (leadingPrice, leadingAmount);
+        return (leadingPrice, leadingAmount_);
     }
 
     function buyToken() external payable {
@@ -272,31 +261,20 @@ contract MemToken is IERC20 {
 
     function _votingActive() internal view returns (bool) {
         return
+            currentSessionId != 0 &&
             votingStartedTime != 0 &&
             block.timestamp < votingStartedTime + timeToVote;
     }
 
     function _hasActiveVote(address user) internal view returns (bool) {
-        return _votingActive() && votes[user].vote;
+        return _votingActive() && votes[currentSessionId][user].voted;
     }
 
     function _resetVoting() internal {
-        for (uint256 i = 0; i < voterList.length; i++) {
-            address user = voterList[i];
-            uint256 price = votes[user].price;
-
-            delete priceTotals[price];
-            delete votes[user]; // We can delete only vote, if we need track history
-        }
-
-        delete voterList;
-
+        currentSessionId = 0;
         leadingPrice = 0;
-        leadingAmount = 0;
         votingStartedTime = 0;
     }
-
-    // NEW-END ========================================================================================================================
 
     // Admin functions
     modifier onlyAdmin() {
