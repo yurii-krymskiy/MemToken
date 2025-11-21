@@ -48,7 +48,10 @@ abstract contract MemTokenVoting is MemTokenBase, MemTokenERC20 {
     }
 
     function endVoting() external returns (uint256, uint256) {
-        require(_votingActive(), "Voting: not active");
+        require(
+            currentSessionId != 0 && votingStartedTime != 0,
+            "Voting: no session"
+        );
         require(
             block.timestamp >= votingStartedTime + timeToVote,
             "Voting: period not over"

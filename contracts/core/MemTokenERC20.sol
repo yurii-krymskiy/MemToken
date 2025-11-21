@@ -5,10 +5,6 @@ import {IERC20} from "../IERC20.sol";
 import {MemTokenBase} from "./MemTokenBase.sol";
 
 abstract contract MemTokenERC20 is IERC20, MemTokenBase {
-    uint256 internal _totalSupply;
-    mapping(address => uint256) internal _balances;
-    mapping(address => mapping(address => uint256)) internal _allowances;
-
     function totalSupply() external view override returns (uint256) {
         return _totalSupply;
     }

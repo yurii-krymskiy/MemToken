@@ -4,9 +4,9 @@ pragma solidity ^0.8.28;
 import {IERC20} from "../IERC20.sol";
 
 abstract contract MemTokenBase is IERC20 {
-    uint256 private _totalSupply;
-    mapping(address => uint256) private _balances;
-    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 internal _totalSupply;
+    mapping(address => uint256) internal _balances;
+    mapping(address => mapping(address => uint256)) internal _allowances;
 
     string public name;
     string public symbol;
